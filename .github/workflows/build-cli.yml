@@ -1,0 +1,124 @@
+name: build-cli
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # каждые 6 часов
+  workflow_dispatch:         # + ручной запуск из UI
+
+permissions:
+  contents: write            # для создания релизов
+
+jobs:
+  mirror:
+    runs-on: windows-latest
+    steps:
+      # 1. Клон нашего репо (нужен для gh CLI и pyinstaller spec)
+      - uses: actions/checkout@v4
+
+      # 2. Тянем последний тег из upstream
+      - name: Resolve upstream latest tag
+        id: ups
+        shell: pwsh
+        run: |
+          $r = Invoke-RestMethod `
+            -Uri 'https://api.github.com/repos/Flowseal/tg-ws-proxy/releases/latest' `
+            -Headers @{ 'User-Agent' = 'slipgate-tgws-cli' }
+          $tag = $r.tag_name
+          Write-Host "Upstream latest: $tag"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # 3. Уже собран? тогда пропускаем
+      - name: Skip if already mirrored
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.ups.outputs.tag }}'
+          $exists = $false
+          try {
+            gh release view $tag --json tagName 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $exists = $true }
+          } catch { }
+          Write-Host "Already mirrored: $exists"
+          "skip=$($exists.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # 4. Чекаут upstream-исходников по тегу
+      - name: Checkout Flowseal source
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Flowseal/tg-ws-proxy
+          ref: ${{ steps.ups.outputs.tag }}
+          path: upstream
+
+      - name: Setup Python
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 5. Собираем CLI exe — НИКАКОГО pystray/customtkinter/windows.py
+      - name: Build headless CLI exe
+        if: steps.check.outputs.skip != 'true'
+        shell: pwsh
+        working-directory: upstream
+        run: |
+          # Зависимости proxy/* из pyproject. Tray-only пакеты НЕ ставим.
+          pip install pyinstaller cryptography
+          if (Test-Path 'requirements.txt') {
+            # Фильтруем — убираем pystray, pillow, customtkinter, pyperclip
+            (Get-Content requirements.txt) `
+              | Where-Object { $_ -notmatch '^(pystray|pillow|customtkinter|pyperclip)' } `
+              | Set-Content requirements-cli.txt
+            pip install -r requirements-cli.txt
+          }
+
+          # Минимальный CLI-entry: главная функция Flowseal с argparse
+          @"
+          from proxy.tg_ws_proxy import main
+          if __name__ == '__main__':
+              main()
+          "@ | Set-Content _cli.py -Encoding utf8
+
+          # Сборка. --console чтобы не было GUI subsystem.
+          pyinstaller --onefile --console `
+            --name TgWsProxy_windows `
+            --collect-submodules proxy `
+            --collect-submodules cryptography `
+            --hidden-import proxy `
+            --hidden-import proxy.tg_ws_proxy `
+            --hidden-import proxy.bridge `
+            --hidden-import proxy.config `
+            --hidden-import proxy.balancer `
+            --hidden-import proxy.fake_tls `
+            --hidden-import proxy.raw_websocket `
+            --hidden-import proxy.stats `
+            --hidden-import proxy.utils `
+            --exclude-module pystray `
+            --exclude-module customtkinter `
+            --exclude-module PIL `
+            --exclude-module tkinter `
+            _cli.py
+
+          # Sanity check
+          if (-not (Test-Path 'dist/TgWsProxy_windows.exe')) {
+            Write-Error 'Build failed: dist/TgWsProxy_windows.exe not found'
+            exit 1
+          }
+          $size = (Get-Item 'dist/TgWsProxy_windows.exe').Length
+          Write-Host "Built TgWsProxy_windows.exe — $([math]::Round($size/1MB,1)) MB"
+
+      # 6. Публикуем релиз с тем же тегом, что upstream
+      - name: Create release
+        if: steps.check.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.ups.outputs.tag }}'
+          $notes = "Headless CLI build of [Flowseal/tg-ws-proxy@$tag](https://github.com/Flowseal/tg-ws-proxy/releases/tag/$tag).`n`nBuilt without ``pystray`` / ``customtkinter`` so there is no tray icon and no GUI dialogs. Used by Slipgate auto-updater."
+          gh release create $tag `
+            upstream/dist/TgWsProxy_windows.exe `
+            --title "CLI mirror $tag" `
+            --notes $notes
