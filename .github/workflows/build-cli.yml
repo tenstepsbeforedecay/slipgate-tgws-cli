@@ -202,11 +202,18 @@ jobs:
             exit 1
           }
 
-          # 7b. Реальный запуск: bind порта + ленивый импорт под --log-file.
+          # 7b. Реальный запуск ровно тем набором флагов, который строит
+          # Slipgate (src/main/core/tgws.ts). Если upstream переименует или
+          # выкинет любой из них, argparse ответит кодом 2 — ловим здесь, а
+          # не у пользователя после установки обновления.
           $port = 14431
           $runArgs = @(
             '--host', '127.0.0.1', '--port', "$port",
             '--secret', '00112233445566778899aabbccddeeff',
+            '--dc-ip', '2:149.154.167.220', '--dc-ip', '4:149.154.167.220',
+            '--buf-kb', '256', '--pool-size', '4',
+            '--cfproxy-domain', 'example.com',
+            '--fake-tls-domain', 'example.com',
             '--no-cfproxy', '--log-file', 'smoke.log', '-v'
           )
           $proxy = Start-Process -FilePath $exe -ArgumentList $runArgs -NoNewWindow -PassThru `
