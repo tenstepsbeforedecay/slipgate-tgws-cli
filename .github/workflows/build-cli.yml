@@ -32,14 +32,18 @@ jobs:
       - name: Resolve upstream tag
         id: ups
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          $ErrorActionPreference = 'Stop'
           $tag = '${{ inputs.tag }}'
           if (-not $tag) {
-            $r = Invoke-RestMethod `
-              -Uri 'https://api.github.com/repos/Flowseal/tg-ws-proxy/releases/latest' `
-              -Headers @{ 'User-Agent' = 'slipgate-tgws-cli' }
-            $tag = $r.tag_name
+            # Scheduled runs must authenticate: the runner's shared public IP
+            # frequently exhausts GitHub's 60-request anonymous API quota.
+            $tag = gh api repos/Flowseal/tg-ws-proxy/releases/latest --jq '.tag_name'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the upstream release tag' }
           }
+          if (-not $tag) { throw 'Upstream release returned an empty tag' }
           Write-Host "Building upstream tag: $tag"
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
