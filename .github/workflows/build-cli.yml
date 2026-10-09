@@ -104,15 +104,12 @@ jobs:
           }
 
           if (Test-Path 'pyproject.toml') {
-            # Забираем [project].dependencies без tomllib-плясок: строки вида
-            # "pkg==1.2.3; marker" внутри dependencies = [ ... ].
-            $raw = Get-Content pyproject.toml -Raw
-            $m = [regex]::Match($raw, '(?ms)^\s*dependencies\s*=\s*\[(.*?)\]')
-            if ($m.Success) {
-              $deps += [regex]::Matches($m.Groups[1].Value, '"([^"]+)"') |
-                ForEach-Object { $_.Groups[1].Value } |
-                Where-Object { $_ -notmatch $guiPattern }
-            }
+            # Забираем [project].dependencies через tomllib (python из
+            # setup-python, 3.11+). Regex по тексту обрывал список на первой
+            # "]" — на "httpx[http2]" — и exe уезжал без httpx/h2.
+            $deps += (python -c "import tomllib;print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))") |
+              Where-Object { $_.Trim() -and $_ -notmatch $guiPattern }
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to read pyproject.toml dependencies' }
           }
 
           # Маркеры окружения отдаём pip через requirements-файл — он сам
@@ -150,11 +147,15 @@ jobs:
           # --collect-all certifi тянет и модуль, и cacert.pem.
           # utils.logging_setup импортируется лениво внутри main() под
           # --log-file, сам PyInstaller его не находит.
+          # httpx/h2 и proxy.cf_h2/proxy.h2_transport грузятся лениво под
+          # CF-прокси по HTTP/2 — сам PyInstaller их тоже не находит.
           pyinstaller --onefile --console `
             --name TgWsProxy_windows `
             --collect-all certifi `
             --collect-submodules proxy `
             --collect-submodules cryptography `
+            --collect-submodules httpx `
+            --collect-submodules h2 `
             --hidden-import proxy `
             --hidden-import proxy.tg_ws_proxy `
             --hidden-import proxy.bridge `
@@ -164,6 +165,8 @@ jobs:
             --hidden-import proxy.raw_websocket `
             --hidden-import proxy.stats `
             --hidden-import proxy.utils `
+            --hidden-import proxy.cf_h2 `
+            --hidden-import proxy.h2_transport `
             --hidden-import utils.logging_setup `
             --exclude-module pystray `
             --exclude-module customtkinter `
@@ -301,6 +304,7 @@ jobs:
         if: needs.mirror.result == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}   # в notify нет checkout — без этого gh не знает репо
           TAG: ${{ needs.mirror.outputs.tag }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
