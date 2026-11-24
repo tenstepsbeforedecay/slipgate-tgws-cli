@@ -1,0 +1,199 @@
+{
+  "fields": [
+    {
+      "id": "dcIp",
+      "semantics": 1,
+      "flag": "--dc-ip",
+      "type": "list",
+      "default": [
+        "2:149.154.167.220",
+        "4:149.154.167.220"
+      ],
+      "label": {
+        "ru": "Датацентры Telegram (DC → IP)",
+        "en": "Telegram Data Centers (DC → IP)"
+      },
+      "format": "dc",
+      "bareEmpty": true,
+      "upstreamLabelKey": "section.dc"
+    },
+    {
+      "id": "bufKb",
+      "semantics": 1,
+      "flag": "--buf-kb",
+      "type": "integer",
+      "default": 256,
+      "label": {
+        "ru": "Буфер, КБ (по умолчанию 256)",
+        "en": "Buffer, KB (default 256)"
+      },
+      "upstreamLabelKey": "label.buf_kb",
+      "min": 4,
+      "max": 65536
+    },
+    {
+      "id": "poolSize",
+      "semantics": 1,
+      "flag": "--pool-size",
+      "type": "integer",
+      "default": 4,
+      "label": {
+        "ru": "Пул WebSocket-сессий (по умолчанию 4)",
+        "en": "WebSocket session pool (default 4)"
+      },
+      "min": 0,
+      "max": 1024,
+      "upstreamLabelKey": "label.pool_size"
+    },
+    {
+      "id": "verbose",
+      "semantics": 1,
+      "flag": "--verbose",
+      "type": "boolean",
+      "default": false,
+      "label": {
+        "ru": "Подробное логирование (verbose)",
+        "en": "Verbose logging"
+      },
+      "upstreamLabelKey": "label.verbose"
+    },
+    {
+      "id": "cfproxy",
+      "semantics": 1,
+      "flag": "--no-cfproxy",
+      "type": "boolean",
+      "default": true,
+      "label": {
+        "ru": "Включить CF-прокси",
+        "en": "Enable CF proxy"
+      },
+      "flagWhen": false,
+      "upstreamLabelKey": "label.cf_enable"
+    },
+    {
+      "id": "h2",
+      "semantics": 1,
+      "flag": "--no-h2",
+      "type": "boolean",
+      "default": true,
+      "label": {
+        "ru": "Мультиплексирование медиа (HTTP/2)",
+        "en": "Media multiplexing (HTTP/2)"
+      },
+      "flagWhen": false,
+      "upstreamLabelKey": "label.h2_enable",
+      "requires": [
+        {
+          "id": "cfproxy",
+          "equals": true
+        },
+        {
+          "id": "disableSecure",
+          "equals": false
+        },
+        {
+          "id": "forceTestDc",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "id": "disableSecure",
+      "semantics": 1,
+      "flag": "--no-secure",
+      "type": "boolean",
+      "default": false,
+      "label": {
+        "ru": "Выключить TLS для CF-прокси и CF-worker",
+        "en": "Disable TLS for CF-proxy and CF-worker"
+      },
+      "upstreamLabelKey": "label.no_secure"
+    },
+    {
+      "id": "cfproxyUserDomain",
+      "semantics": 1,
+      "flag": "--cfproxy-domain",
+      "type": "list",
+      "default": [],
+      "label": {
+        "ru": "Свой домен",
+        "en": "Custom domain"
+      },
+      "format": "domain",
+      "upstreamLabelKey": "label.cf_custom_domain"
+    },
+    {
+      "id": "cfproxyWorkerDomain",
+      "semantics": 1,
+      "flag": "--cfproxy-worker-domain",
+      "type": "list",
+      "default": [],
+      "label": {
+        "ru": "Cloudflare Worker домены (через запятую)",
+        "en": "Cloudflare Worker domains (comma-separated)"
+      },
+      "format": "domain",
+      "upstreamLabelKey": "label.cfworker_domains"
+    },
+    {
+      "id": "fakeTlsDomain",
+      "semantics": 1,
+      "flag": "--fake-tls-domain",
+      "type": "string",
+      "default": "",
+      "label": {
+        "ru": "Домен FakeTLS",
+        "en": "FakeTLS domain"
+      },
+      "format": "domain"
+    },
+    {
+      "id": "forceTestDc",
+      "semantics": 1,
+      "flag": "--force-test-dc",
+      "type": "boolean",
+      "default": false,
+      "label": {
+        "ru": "Тестовые датацентры Telegram",
+        "en": "Telegram test data centers"
+      }
+    },
+    {
+      "id": "proxyProtocol",
+      "semantics": 1,
+      "flag": "--proxy-protocol",
+      "type": "boolean",
+      "default": false,
+      "label": {
+        "ru": "Протокол PROXY v1",
+        "en": "PROXY protocol v1"
+      }
+    },
+    {
+      "id": "cfproxyPriority",
+      "semantics": 1,
+      "flag": "--cfproxy-priority",
+      "type": "boolean",
+      "default": true,
+      "booleanValue": true,
+      "label": {
+        "ru": "--cfproxy-priority",
+        "en": "--cfproxy-priority"
+      },
+      "upstreamLabelKey": "label.cfproxy_priority"
+    },
+    {
+      "id": "wsKeepalive",
+      "semantics": 1,
+      "flag": "--ws-keepalive",
+      "type": "number",
+      "default": 30,
+      "min": 0,
+      "max": 86400,
+      "label": {
+        "ru": "Интервал WebSocket keepalive",
+        "en": "WebSocket keepalive interval"
+      }
+    }
+  ]
+}

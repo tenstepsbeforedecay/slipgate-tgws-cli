@@ -1,321 +1,144 @@
 name: build-cli
-
 on:
   schedule:
-    - cron: '0 */2 * * *'    # каждые 2 часа
+    - cron: '0 */2 * * *'
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'validate: сборка и smoke без публикации; release: штатный выпуск'
+        type: choice
+        options: [validate, release]
+        default: validate
+        required: true
       tag:
-        description: 'Тег upstream для сборки (пусто = latest)'
-        required: false
+        description: 'Стабильный upstream tag (пусто = latest); опубликованные релизы неизменяемы'
         default: ''
-      force:
-        description: 'Пересобрать и заменить ассет, даже если релиз уже есть'
-        type: boolean
-        default: false
-
-permissions:
-  contents: write            # для создания релизов
-  issues: write              # для issue-уведомления о поломке
-
+        required: false
+permissions: {}
+concurrency:
+  group: build-cli-publication
+  cancel-in-progress: false
 jobs:
-  mirror:
-    runs-on: windows-latest
+  resolve:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'release'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # List releases скрывает drafts от токена без push access.
     outputs:
-      tag: ${{ steps.ups.outputs.tag }}
-      published: ${{ steps.publish.outputs.published }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      skip: ${{ steps.resolve.outputs.skip }}
+      recover: ${{ steps.resolve.outputs.recover }}
     steps:
-      # 1. Клон нашего репо (нужен для gh CLI)
-      - uses: actions/checkout@v4
-
-      # 2. Тянем тег из upstream (или берём заданный вручную)
-      - name: Resolve upstream tag
-        id: ups
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $tag = '${{ inputs.tag }}'
-          if (-not $tag) {
-            # Scheduled runs must authenticate: the runner's shared public IP
-            # frequently exhausts GitHub's 60-request anonymous API quota.
-            $tag = gh api repos/Flowseal/tg-ws-proxy/releases/latest --jq '.tag_name'
-            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the upstream release tag' }
-          }
-          if (-not $tag) { throw 'Upstream release returned an empty tag' }
-          Write-Host "Building upstream tag: $tag"
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-      # 3. Уже собран? тогда пропускаем. force игнорирует проверку — нужен,
-      #    чтобы перевыпустить битый релиз под тем же тегом.
-      - name: Skip if already mirrored
-        id: check
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = '${{ steps.ups.outputs.tag }}'
-          $force = '${{ inputs.force }}' -eq 'true'
-          $exists = $false
-          gh release view $tag --json tagName *> $null
-          if ($LASTEXITCODE -eq 0) { $exists = $true }
-          $global:LASTEXITCODE = 0
-          $skip = $exists -and (-not $force)
-          Write-Host "Release exists: $exists; force: $force; skip: $skip"
-          "exists=$($exists.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "skip=$($skip.ToString().ToLower())"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          exit 0
-
-      # 4. Чекаут upstream-исходников по тегу
-      - name: Checkout Flowseal source
-        if: steps.check.outputs.skip != 'true'
-        uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          repository: Flowseal/tg-ws-proxy
-          ref: ${{ steps.ups.outputs.tag }}
-          path: upstream
-
-      - name: Setup Python
-        if: steps.check.outputs.skip != 'true'
-        uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0, Node 24
         with:
-          python-version: '3.11'
-
-      # 5. Зависимости. Upstream переехал с requirements.txt на pyproject.toml
-      #    (в 1.10.0 requirements.txt уже нет), поэтому читаем оба источника и
-      #    выкидываем только tray/GUI-пакеты. Раньше пропажа requirements.txt
-      #    молча оставляла сборку без certifi — exe падал на старте.
-      - name: Install build dependencies
-        if: steps.check.outputs.skip != 'true'
-        shell: pwsh
-        working-directory: upstream
-        run: |
-          $ErrorActionPreference = 'Stop'
-          pip install --upgrade pip
-          pip install pyinstaller
-
-          $guiPattern = '^(pystray|pillow|customtkinter|pyperclip|pyobjc)'
-          $deps = @()
-
-          if (Test-Path 'requirements.txt') {
-            $deps += (Get-Content requirements.txt) |
-              Where-Object { $_.Trim() -and $_ -notmatch '^\s*#' -and $_ -notmatch $guiPattern }
-          }
-
-          if (Test-Path 'pyproject.toml') {
-            # Забираем [project].dependencies через tomllib (python из
-            # setup-python, 3.11+). Regex по тексту обрывал список на первой
-            # "]" — на "httpx[http2]" — и exe уезжал без httpx/h2.
-            $deps += (python -c "import tomllib;print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))") |
-              Where-Object { $_.Trim() -and $_ -notmatch $guiPattern }
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to read pyproject.toml dependencies' }
-          }
-
-          # Маркеры окружения отдаём pip через requirements-файл — он сам
-          # отсечёт неподходящие (Darwin-only и т.п.).
-          $deps = $deps | Sort-Object -Unique
-          if ($deps.Count -eq 0) {
-            Write-Error 'Не удалось определить зависимости upstream: нет ни requirements.txt, ни dependencies в pyproject.toml'
-            exit 1
-          }
-          $deps | Set-Content requirements-cli.txt -Encoding utf8
-          Write-Host "CLI deps:"
-          $deps | ForEach-Object { Write-Host "  $_" }
-          pip install -r requirements-cli.txt
-
-          # certifi нужен proxy/utils.py напрямую — страхуемся на случай, если
-          # upstream опять перетасует список зависимостей.
-          pip install certifi
-
-      # 6. Собираем CLI exe — НИКАКОГО pystray/customtkinter/windows.py
-      - name: Build headless CLI exe
-        if: steps.check.outputs.skip != 'true'
-        shell: pwsh
-        working-directory: upstream
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          # Минимальный CLI-entry: главная функция Flowseal с argparse
-          @"
-          from proxy.tg_ws_proxy import main
-          if __name__ == '__main__':
-              main()
-          "@ | Set-Content _cli.py -Encoding utf8
-
-          # --console чтобы не было GUI subsystem.
-          # --collect-all certifi тянет и модуль, и cacert.pem.
-          # utils.logging_setup импортируется лениво внутри main() под
-          # --log-file, сам PyInstaller его не находит.
-          # httpx/h2 и proxy.cf_h2/proxy.h2_transport грузятся лениво под
-          # CF-прокси по HTTP/2 — сам PyInstaller их тоже не находит.
-          pyinstaller --onefile --console `
-            --name TgWsProxy_windows `
-            --collect-all certifi `
-            --collect-submodules proxy `
-            --collect-submodules cryptography `
-            --collect-submodules httpx `
-            --collect-submodules h2 `
-            --hidden-import proxy `
-            --hidden-import proxy.tg_ws_proxy `
-            --hidden-import proxy.bridge `
-            --hidden-import proxy.config `
-            --hidden-import proxy.balancer `
-            --hidden-import proxy.fake_tls `
-            --hidden-import proxy.raw_websocket `
-            --hidden-import proxy.stats `
-            --hidden-import proxy.utils `
-            --hidden-import proxy.cf_h2 `
-            --hidden-import proxy.h2_transport `
-            --hidden-import utils.logging_setup `
-            --exclude-module pystray `
-            --exclude-module customtkinter `
-            --exclude-module PIL `
-            --exclude-module tkinter `
-            _cli.py
-
-          if (-not (Test-Path 'dist/TgWsProxy_windows.exe')) {
-            Write-Error 'Build failed: dist/TgWsProxy_windows.exe not found'
-            exit 1
-          }
-          $size = (Get-Item 'dist/TgWsProxy_windows.exe').Length
-          Write-Host "Built TgWsProxy_windows.exe — $([math]::Round($size/1MB,1)) MB"
-
-      # 7. Smoke-тест: exe обязан ответить на --help и реально слушать порт.
-      #    Именно этой проверки не хватало — v1.10.0 уехал в прод со сборкой,
-      #    падавшей с ModuleNotFoundError: No module named 'certifi'.
-      - name: Smoke test the exe
-        if: steps.check.outputs.skip != 'true'
-        shell: pwsh
-        working-directory: upstream
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # taskkill ниже возвращает ненулевой код, если процесса уже нет —
-          # в pwsh 7.4+ это иначе свалит шаг.
-          $PSNativeCommandUseErrorActionPreference = $false
-          $exe = (Resolve-Path 'dist/TgWsProxy_windows.exe').Path
-
-          # 7a. argparse usage — ловит любые ошибки импорта на старте.
-          $p = Start-Process -FilePath $exe -ArgumentList '--help' -NoNewWindow -Wait -PassThru `
-                 -RedirectStandardOutput help.out -RedirectStandardError help.err
-          $out = @(
-            (Get-Content help.out -Raw -ErrorAction SilentlyContinue),
-            (Get-Content help.err -Raw -ErrorAction SilentlyContinue)
-          ) -join "`n"
-          Write-Host "--- exit $($p.ExitCode) ---"
-          Write-Host $out
-          if ($p.ExitCode -ne 0 -or $out -notmatch 'usage:\s*TgWsProxy') {
-            Write-Error "Smoke test failed: --help exited $($p.ExitCode) without a usage banner"
-            exit 1
-          }
-
-          # 7b. Реальный запуск ровно тем набором флагов, который строит
-          # Slipgate (src/main/core/tgws.ts). Если upstream переименует или
-          # выкинет любой из них, argparse ответит кодом 2 — ловим здесь, а
-          # не у пользователя после установки обновления.
-          $port = 14431
-          $runArgs = @(
-            '--host', '127.0.0.1', '--port', "$port",
-            '--secret', '00112233445566778899aabbccddeeff',
-            '--dc-ip', '2:149.154.167.220', '--dc-ip', '4:149.154.167.220',
-            '--buf-kb', '256', '--pool-size', '4',
-            '--cfproxy-domain', 'example.com',
-            '--fake-tls-domain', 'example.com',
-            '--no-cfproxy', '--log-file', 'smoke.log', '-v'
-          )
-          $proxy = Start-Process -FilePath $exe -ArgumentList $runArgs -NoNewWindow -PassThru `
-                     -RedirectStandardOutput run.out -RedirectStandardError run.err
-          $listening = $false
-          foreach ($i in 1..30) {
-            Start-Sleep -Seconds 1
-            if ($proxy.HasExited) { break }
-            try {
-              $c = New-Object System.Net.Sockets.TcpClient
-              $c.Connect('127.0.0.1', $port)
-              $listening = $c.Connected
-              $c.Close()
-            } catch { }
-            if ($listening) { break }
-          }
-          # onefile-бутлоадер поднимает дочерний процесс — гасим всё дерево.
-          taskkill.exe /F /T /IM TgWsProxy_windows.exe *> $null
-          $global:LASTEXITCODE = 0
-          Write-Host "--- runtime log ---"
-          Get-Content run.out, run.err, smoke.log -Raw -ErrorAction SilentlyContinue | Write-Host
-          if (-not $listening) {
-            Write-Error "Smoke test failed: proxy did not listen on 127.0.0.1:$port"
-            exit 1
-          }
-          Write-Host "Smoke test OK: --help + listening on :$port"
-
-      # 8. Публикуем релиз с тем же тегом, что upstream
-      - name: Publish release
-        id: publish
-        if: steps.check.outputs.skip != 'true'
-        shell: pwsh
+          python-version: '3.11.14'
+      - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $tag = '${{ steps.ups.outputs.tag }}'
-          $exe = 'upstream/dist/TgWsProxy_windows.exe'
-          $notes = "Headless CLI build of [Flowseal/tg-ws-proxy@$tag](https://github.com/Flowseal/tg-ws-proxy/releases/tag/$tag).`n`nBuilt without ``pystray`` / ``customtkinter`` so there is no tray icon and no GUI dialogs. Used by Slipgate auto-updater.`n`nПеред публикацией exe проходит smoke-тест: ``--help`` + реальный bind порта."
-
-          if ('${{ steps.check.outputs.exists }}' -eq 'true') {
-            Write-Host "Release $tag exists — replacing the asset"
-            gh release upload $tag $exe --clobber
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-            gh release edit $tag --notes $notes
-          } else {
-            gh release create $tag $exe --title "CLI mirror $tag" --notes $notes
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-          }
-          "published=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-  # Уведомления: Telegram (если заданы секреты) + issue при поломке сборки.
-  notify:
-    needs: mirror
-    if: always() && (needs.mirror.outputs.published == 'true' || needs.mirror.result == 'failure')
-    runs-on: ubuntu-latest
+          RUN_MODE: release
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: python scripts/release.py resolve
+  validate-resolve:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.event_name == 'workflow_dispatch' && inputs.mode == 'validate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
-      issues: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit: ${{ steps.resolve.outputs.commit }}
     steps:
-      - name: Telegram notification
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          TAG: ${{ needs.mirror.outputs.tag }}
-          RESULT: ${{ needs.mirror.result }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
-            echo "TG_BOT_TOKEN/TG_CHAT_ID не заданы — уведомление пропущено"
-            exit 0
-          fi
-          if [ "$RESULT" = "failure" ]; then
-            TEXT="Slipgate tgws: сборка ${TAG:-latest} упала. $RUN_URL"
-          else
-            TEXT="Slipgate tgws: опубликован TgWsProxy $TAG (smoke-тест пройден). ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
-          fi
-          curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${TG_CHAT_ID}" --data-urlencode "text=${TEXT}" --data-urlencode "disable_web_page_preview=true" > /dev/null
-
-      - name: Open issue on failure
-        if: needs.mirror.result == 'failure'
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.11.14'
+      - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}   # в notify нет checkout — без этого gh не знает репо
-          TAG: ${{ needs.mirror.outputs.tag }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          TITLE="build-cli: сборка ${TAG:-latest} не прошла"
-          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number')
-          BODY=$(printf '%s\n\n%s\n\n%s' \
-            "Сборка или smoke-тест TgWsProxy для тега ${TAG:-latest} завершились с ошибкой." \
-            "Лог: $RUN_URL" \
-            "Пока это не починено, Slipgate остаётся на предыдущей рабочей версии: новый бинарник проверяется перед установкой, битый не применяется.")
-          if [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" --body "$BODY"
-          else
-            gh issue create --title "$TITLE" --body "$BODY"
-          fi
+          RUN_MODE: validate
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: python scripts/release.py validate
+  build:
+    needs: [resolve, validate-resolve]
+    if: always() && !cancelled() && (needs.validate-resolve.result == 'success' || (needs.resolve.result == 'success' && needs.resolve.outputs.skip != 'true' && needs.resolve.outputs.recover == ''))
+    runs-on: windows-2025
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: Flowseal/tg-ws-proxy
+          ref: ${{ needs.validate-resolve.outputs.commit || needs.resolve.outputs.commit }}
+          path: upstream
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.11.14'
+          architecture: x64
+      - name: Проверки публикации
+        run: python -m unittest discover -s scripts -p test_release.py -v
+      - name: Зафиксированные инструменты сборки
+        run: 'python -m pip install --only-binary=:all: --retries 3 --timeout 30 pip==25.3 packaging==25.0 pyinstaller==6.16.0'
+      - name: Сборка и проверки
+        env:
+          TAG: ${{ needs.validate-resolve.outputs.tag || needs.resolve.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.validate-resolve.outputs.commit || needs.resolve.outputs.commit }}
+        run: python scripts/build-ci.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ needs.validate-resolve.result == 'success' && 'cli-validation' || 'cli-staging' }}
+          path: bundle/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Отчёт об остановке
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: review-required
+          path: |
+            review-required.txt
+            upstream/smoke-output.txt
+            upstream/pip-report.json
+          if-no-files-found: ignore
+  publish:
+    needs: [resolve, build]
+    if: always() && !cancelled() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'release')) && needs.resolve.result == 'success' && needs.resolve.outputs.skip != 'true' && (needs.build.result == 'success' || needs.resolve.outputs.recover != '')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.11.14'
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0, Node 24
+        with:
+          name: cli-staging
+          path: bundle
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.resolve.outputs.recover || github.run_id }}
+      - name: Проверка production validator
+        run: node scripts/validate-manifest.cjs bundle/capabilities.json
+      - name: Draft → readback SHA256 → publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
+          RECOVER_RUN: ${{ needs.resolve.outputs.recover }}
+          RUN_MODE: release
+        run: python scripts/release.py publish
