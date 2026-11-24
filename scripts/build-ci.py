@@ -71,6 +71,7 @@ def main():
     result = run([str(exe), '--help'], root, 45)
     if not re.search(r'usage:\s*TgWsProxy', result.stdout + result.stderr):
         raise ValueError('Нет штатного --help')
+    print('PASS: CLI --help')
     # Only our own process tree is stopped, never by image name.
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
@@ -93,6 +94,7 @@ def main():
                     time.sleep(1)
             if not listening:
                 raise ValueError('Smoke: CLI не открыл локальный порт')
+            print('PASS: CLI local TCP bind')
         finally:
             subprocess.run(['taskkill.exe', '/F', '/T', '/PID', str(process.pid)], timeout=20, capture_output=True)
             process.wait(timeout=20)
@@ -117,6 +119,7 @@ def main():
     (bundle / 'build-info.json').write_text(json.dumps({'source': commit, 'python': sys.version, 'dependencies': run([sys.executable, '-m', 'pip', 'freeze']).stdout,
         'pipReport': json.loads((root / 'pip-report.json').read_text())}), encoding='utf-8')
     load('release').validate_bundle({name: (bundle / name).read_bytes() for name in load('release').NAMES}, {'tag': os.environ['TAG'], 'commit': commit})
+    print('PASS: PE x64, schema identity/digest, reviewed routing, complete bundle')
     print(run(['node', str(Path(__file__).with_name('validate-manifest.cjs')), str(bundle / 'capabilities.json')]).stdout)
 
 

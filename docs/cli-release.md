@@ -1,6 +1,6 @@
 # Автоматическая сборка CLI
 
-Меняется один существующий `.github/workflows/build-cli.yml` репозитория `tenstepsbeforedecay/slipgate-tgws-cli`. Нового workflow нет. Включение требует владельца с правами записи содержимого и workflow: подключённый GitHub connector в этой сессии вернул `push: false`. Обход ограничений не выполнялся.
+Один существующий `.github/workflows/build-cli.yml` репозитория `tenstepsbeforedecay/slipgate-tgws-cli` отвечает за проверку и выпуск. Для его сопровождения нужны права записи содержимого и workflow.
 
 ## Установка
 
@@ -20,7 +20,7 @@
 
 Для ручного штатного выпуска требуется явно выбрать `mode=release`; расписание продолжает штатный выпуск без ручных inputs и сохраняет published-release no-op. Не используйте release вместо validate для демонстрации сборки. Наличие validate в локальном комплекте не означает, что он уже внедрён или запускался в GitHub.
 
-Для устранения текущего блокера подключите GitHub под владельцем `tenstepsbeforedecay` с доступом к `tenstepsbeforedecay/slipgate-tgws-cli` и разрешениями Contents/Workflows/Actions write. Конкретные кнопки смены аккаунта в приложении здесь не подтверждены; токены передавать в чат не нужно.
+Для переноса изменений нужны права Contents/Workflows/Actions write на `tenstepsbeforedecay/slipgate-tgws-cli`. Не передавайте токены в чат.
 
 ## Совместимость старых Slipgate
 
