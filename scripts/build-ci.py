@@ -38,7 +38,7 @@ def main():
         raise ValueError('Checkout не совпадает с exact commit')
     dependencies = []
     if (root / 'requirements.txt').is_file():
-        dependencies.extend(x.strip() for x in (root / 'requirements.txt').read_text().splitlines() if x.strip() and not x.strip().startswith('#'))
+        dependencies.extend(x.strip() for x in (root / 'requirements.txt').read_text(encoding='utf-8-sig').splitlines() if x.strip() and not x.strip().startswith('#'))
     if (root / 'pyproject.toml').is_file():
         dependencies.extend(tomllib.loads((root / 'pyproject.toml').read_text(encoding='utf-8'))['project']['dependencies'])
     filtered = []
@@ -117,7 +117,7 @@ def main():
     routing = load('generate-routing').generate({'commit': commit, 'assetDigest': hashlib.sha256(binary).hexdigest()}, sources, schema)
     (bundle / 'routing.json').write_text(json.dumps(routing, ensure_ascii=False), encoding='utf-8')
     (bundle / 'build-info.json').write_text(json.dumps({'source': commit, 'python': sys.version, 'dependencies': run([sys.executable, '-m', 'pip', 'freeze']).stdout,
-        'pipReport': json.loads((root / 'pip-report.json').read_text())}), encoding='utf-8')
+        'pipReport': json.loads((root / 'pip-report.json').read_text(encoding='utf-8'))}), encoding='utf-8')
     load('release').validate_bundle({name: (bundle / name).read_bytes() for name in load('release').NAMES}, {'tag': os.environ['TAG'], 'commit': commit})
     print('PASS: PE x64, schema identity/digest, reviewed routing, complete bundle')
     print(run(['node', str(Path(__file__).with_name('validate-manifest.cjs')), str(bundle / 'capabilities.json')]).stdout)
